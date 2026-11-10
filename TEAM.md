@@ -1,0 +1,1 @@
+- Member 1 joined the team (Lab 1 Activity 2)
