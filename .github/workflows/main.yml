@@ -1,0 +1,147 @@
+# =============================================================================
+# Lab 2 (Lecture 2) - Collaborative Workflow
+# File: .github/workflows/main.yml
+#
+# On every push to main this workflow:
+#   Step 1  checks out the repository
+#   Step 2  detects WHO pushed (github.actor) and inserts
+#           <p>Updated by <role> (<user>) on <date></p> into index.html (GNU sed)
+#   Step 3  appends "### Updated by <user> on <timestamp> [Commit: <short sha>]" to README.md
+#   Step 4  commits and pushes index.html + README.md back to main with GITHUB_TOKEN
+#   Step 5  (new, not in the slides) publishes the updated site to GitHub Pages
+#
+# Course mapping: Activity 1 = Step 1, Activity 2 = Step 2 (+ Pages),
+#                 Activity 3 = Step 3, Activity 4 = Step 4, Activity 5 = testing.
+# Why things differ from the slides: see CHANGES_vs_course_materials.md
+# =============================================================================
+name: Collaborative Workflow
+
+on:
+  push:
+    branches:
+      - main
+  # Adds a "Run workflow" button in the Actions tab (handy for re-testing).
+  workflow_dispatch: {}
+
+# Least privilege: the token is read-only by default; each job asks only for what it needs.
+# (The slides tell you to switch the repo-wide setting to "Read and write" instead.)
+permissions:
+  contents: read
+
+# Only one run of this workflow at a time on the same branch, so two quick pushes
+# cannot race each other when they both try to push a commit back to main.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # `date` on the runner is UTC by default; show Sydney time instead.
+  TZ: Australia/Sydney
+  # >>> EDIT ME: GitHub usernames for each role (case-sensitive).
+  # Working solo? Put YOUR username as TEAM_LEADER and use commit-message prefixes
+  # [member1] / [member2] to play the other roles (see Step 2).
+  TEAM_LEADER: "QingyueDong"
+  MEMBER_1: "member1-github-username"
+  MEMBER_2: "member2-github-username"
+
+jobs:
+  update_html_and_readme:
+    # Control flow (Lecture 2 "Control Flow"): never react to the bot's own commits.
+    # (Pushes made with GITHUB_TOKEN do not start new runs anyway; this is a second safety net.)
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # needed to push the updated files back to main
+
+    steps:
+      # Step 1: Checkout the repository
+      # (slides use actions/checkout@v3; v4 is used here - newer majors v5/v6 also exist and
+      #  run on Node 24. If the Actions log shows a Node 20 deprecation warning, bump to @v5.)
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Step 2: Update index.html
+      - name: Update index.html
+        env:
+          # Pass untrusted text (a commit message) through an env var, never by pasting
+          # ${{ ... }} straight into the script - that is how script-injection happens.
+          HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          ACTOR="${GITHUB_ACTOR}"
+
+          # Detect the actor (GitHub username) and map it to a team role.
+          case "$ACTOR" in
+            "$TEAM_LEADER") ROLE="Team Leader" ;;
+            "$MEMBER_1")    ROLE="Member 1" ;;
+            "$MEMBER_2")    ROLE="Member 2" ;;
+            *)              ROLE="Contributor" ;;
+          esac
+
+          # Solo mode: a commit message starting with [leader], [member1] or [member2]
+          # overrides the role, so one person can play all three roles.
+          case "$HEAD_COMMIT_MSG" in
+            "[leader]"*)  ROLE="Team Leader" ;;
+            "[member1]"*) ROLE="Member 1" ;;
+            "[member2]"*) ROLE="Member 2" ;;
+          esac
+          echo "Actor: $ACTOR  ->  role: $ROLE"
+
+          # Course command (GNU sed): insert a <p> line just before </body>.
+          sed -i '/<\/body>/i <p>Updated by '"$ROLE"' ('"$ACTOR"') on '"$(date)"'</p>' index.html
+
+          echo "Last 'Updated by' lines in index.html:"
+          grep -n "Updated by" index.html | tail -n 3
+
+      # Step 3: Update README.md (course command, with the time zone added)
+      - name: Update README
+        run: |
+          echo "### Updated by ${GITHUB_ACTOR} on $(date '+%Y-%m-%d %H:%M:%S %Z') [Commit: $(git rev-parse --short HEAD)]" >> README.md
+          tail -n 3 README.md
+
+      # Step 4: Commit changes to index.html and README.md and push them back to main.
+      # actions/checkout already stored GITHUB_TOKEN for `git push`, so the slides'
+      # `git remote set-url ... x-access-token:${{ secrets.GITHUB_TOKEN }}@...` is not needed.
+      - name: Commit and Push Changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Stage only the files this workflow changes (the slides used `git add .`).
+          git add index.html README.md
+          git commit -m "Workflow: Updated HTML and README for ${GITHUB_ACTOR} [skip ci]" || { echo "No changes to commit"; exit 0; }
+
+          # If someone pushed while we were running, rebase onto their work and retry.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "Pushed on attempt ${attempt}"
+              exit 0
+            fi
+            echo "Push rejected (main moved). Rebasing onto origin/main and retrying..."
+            git pull --rebase origin main || { echo "::error::Rebase conflict - re-run the workflow"; exit 1; }
+          done
+          echo "::error::Could not push after 3 attempts"
+          exit 1
+
+      # Step 5 (new): package the site for GitHub Pages.
+      # Why: commits pushed with GITHUB_TOKEN do NOT trigger a "Deploy from a branch" Pages
+      # build, so with the slides' setup the live site always lags one update behind.
+      # Publishing the artifact from this run means the page shows THIS update.
+      # Requires: Settings -> Pages -> Build and deployment -> Source = "GitHub Actions".
+      - name: Upload site for GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+  # Job dependency (Lecture 2 "Job Dependencies"): deploy only after the update job succeeded.
+  deploy_pages:
+    needs: update_html_and_readme
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write             # deploy to GitHub Pages
+      id-token: write          # deploy-pages proves its identity with an OIDC token
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
