@@ -1,2 +1,3 @@
 - Member 1 joined the team (Lab 1 Activity 2)
 - Member 2 joined the team (Lab 1 Activity 2)
+- Team Leader created the repository (Lab 1 Activity 1)
